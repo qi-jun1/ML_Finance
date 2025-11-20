@@ -113,12 +113,13 @@ def triple_barrier(
         stop_loss = pd.Series(index=events.index)
 
     for location, timestamp in events_filtered['End Time'].fillna(close.index[-1]).items():
-        df = close[location:timestamp]
-        df = np.log(df / close[location]) * events_filtered.at[location, 'Side']
-        output.loc[location, 'stop_loss'] = df[df < stop_loss[location]].index.min()
-        output.loc[location, 'profit_taking'] = df[df > profit_taking[location]].index.min()
+        df = close[location:timestamp] #takes the price path from start to the vertical barrier:
+        df = np.log(df / close[location]) * events_filtered.at[location, 'Side'] #Converts prices to log returns relative to entry, adjusted by Side
+        output.loc[location, 'stop_loss'] = df[df < stop_loss[location]].index.min()#earliest time where stop loss is hit within vertical time horizon
+        output.loc[location, 'profit_taking'] = df[df > profit_taking[location]].index.min()#earliest time where profit taking is hit within vertical time horizon
 
     return output
+
 
 def meta_events(
     close: pd.Series,
@@ -138,16 +139,20 @@ def meta_events(
     if timestamp is False:
         timestamp = pd.Series(pd.NaT, index=time_events)
     else:
+        #set timestamps to events start date.
         timestamp = timestamp.loc[time_events]
 
     if side is None:
+        #if none. side_position is filled entirely with one, so we always go long at every event.
+        #both profit and loss barrier is set to the same value.
         side_position, profit_loss = pd.Series(1., index=target.index), [ptsl[0], ptsl[0]]
     else:
+        #if side is set then side_position is either 1 for long or -1 for short. 
+        #profit and loss barrier is set to the same value.
         side_position, profit_loss = side.loc[target.index], ptsl[:2]
 
     # Include 'target' and 'timestamp' in the events DataFrame
     events = pd.concat({'End Time': timestamp, 'Base Width': target, 'Side': side_position, 'target': target, 'timestamp': timestamp}, axis=1).dropna(subset=['Base Width'])
-
 
     df0 = list(map(
         triple_barrier,
@@ -158,6 +163,7 @@ def meta_events(
     ))
     df0 = pd.concat(df0, axis=0)
 
+    #set End Time to earliest barrier hit.
     events['End Time'] = df0.dropna(how='all').min(axis=1)
 
     if side is None:
@@ -166,6 +172,27 @@ def meta_events(
     # Return events including the 'target' and 'timestamp' columns
     return events , df0
 
+
+def triple_barrier_labeling(
+    events: pd.DataFrame,
+    close: pd.Series
+) -> pd.DataFrame:
+    
+    events_filtered = events.dropna(subset=['End Time'])
+    all_dates = events_filtered.index.union(events_filtered['End Time'].values).drop_duplicates()
+    close_filtered = close.reindex(all_dates, method='bfill')
+    out = pd.DataFrame(index=events_filtered.index)
+    
+    #time of first barrier hit
+    out['End Time'] = events['End Time']
+
+    #return timestamp
+    out["timestamp"] = events["timestamp"]
+
+    #Set the Side to either 1/-1 (long/short) depending on wether the stock price difference is positive (long) or negative (short)
+    out['Side'] =  np.sign(close_filtered.loc[events_filtered['End Time'].values].values - close_filtered.loc[events_filtered.index])
+    
+    return out
 
 def meta_labeling(
     events: pd.DataFrame,
@@ -186,14 +213,20 @@ def meta_labeling(
     all_dates = events_filtered.index.union(events_filtered['End Time'].values).drop_duplicates()
     close_filtered = close.reindex(all_dates, method='bfill')
     out = pd.DataFrame(index=events_filtered.index)
-    out['End Time'] = events['End Time']
+    
+    #time of first barrier hit
+    #out['End Time'] = events['End Time']
+
+    #Return of Label: close price at end time/ close price at start time - 1.
     out['Return of Label'] = close_filtered.loc[events_filtered['End Time'].values].values / close_filtered.loc[events_filtered.index] - 1
 
+    #timestamp contains original vertical barrier dates per event. The equality returns zero if unequal so pt or sl
+    # is hit or 1 if vertical barrier is hit. So Label = 1 if a barrier is hit and 0 if vertical barrier is hit.    
     if 'Side' in events_filtered:
         out['Return of Label'] *= events_filtered['Side']
     out['Label'] = np.sign(out['Return of Label'])  * (1 - (events['End Time'] == events['timestamp']))
     if 'Side' in events_filtered:
         out.loc[out['Return of Label'] <= 0, 'Label'] = 0
-        out['Side'] = events_filtered['Side']
+        #out['Side'] = events_filtered['Side']
     return out
 
